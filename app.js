@@ -1330,10 +1330,12 @@ function renderCityDetail() {
 // Render: compare
 // ============================================================
 function renderCompare() {
-  // Default to top-5 if nothing's been picked yet
-  if (State.compareCities.length === 0) {
+  // Seed 5 demo cities once, on the first visit to this tab. After that an
+  // empty selection (e.g. from the Clear button) is left empty.
+  if (State.compareCities.length === 0 && !State.compareSeeded) {
     State.compareCities = CITIES.slice(0, 5).map(c => c.id);
   }
+  State.compareSeeded = true;
 
   const selectedSet = new Set(State.compareCities);
 
@@ -1468,11 +1470,6 @@ function renderCompare() {
       const isMax = totals[i] === max && max > 0;
       const cell = el('td', { class: 'score-cell totals-cell' + (isMax ? ' totals-max' : '') },
         el('strong', {}, fmt(totals[i])));
-      // When cost-adjusted, show how the aggregate was formed (quality × mult).
-      if (compareCostOn) {
-        cell.appendChild(el('div', { class: 'dim mono', style: { fontSize: '0.68rem', fontWeight: 400 } },
-          fmt(quality[i]) + ' × ' + fmt(mults[i])));
-      }
       tr.appendChild(cell);
     });
     if (isHeadToHead) {
