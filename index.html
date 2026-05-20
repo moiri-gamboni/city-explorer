@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coliving Hub City Explorer</title>
+<meta name="description" content="Interactive city comparison for a coliving + coworking hub. Drill into criteria, customize your weights, compare cities side by side.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site">
+  <h1><a href="#/rank" class="site-title">Coliving Hub</a> <span class="sub">· city explorer</span></h1>
+  <nav class="tabs">
+    <a href="#/rank" data-tab="rank">Ranking</a>
+    <a href="#/compare" data-tab="compare">Compare</a>
+    <a href="#/city" data-tab="city">City detail</a>
+    <a href="#/mypicks" data-tab="mypicks">My picks</a>
+    <a href="#/sources" data-tab="sources">Sources</a>
+    <a href="#/legend" data-tab="legend">Methodology</a>
+    <a href="#/about" data-tab="about">About</a>
+  </nav>
+  <button class="quick-legend-btn" id="qlg-btn">Quick legend</button>
+</header>
+
+<main id="app">Loading…</main>
+
+<footer class="site">
+  <span>Generated <span id="gen-date">2026-05-18</span> · <span id="src-count">…</span> sources</span>
+  <span class="spacer"></span>
+  <span class="muted"><a href="https://github.com/moiri-gamboni/city-explorer" target="_blank" rel="noopener">Made by Moïri Gamboni</a> · <a href="data-bundle.zip" download="community-data-bundle.zip">⬇ Download raw data (5 CSVs + legend)</a></span>
+</footer>
+
+<div class="toast" id="toast">Copied!</div>
+
+<script src="data.js"></script>
+<script src="suggested-weights.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
