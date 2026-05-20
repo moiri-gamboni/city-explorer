@@ -41,8 +41,7 @@ const State = {
   rankCities: new Set(DEFAULT_RANK_CITIES.filter(id => CITIES.some(c => c.id === id))),
   compareCities: [],
   compareCritSort: 'original', // original | spread | maxscore | name
-  compareMode: 'raw',          // raw | weighted
-  rankMode: 'weighted',        // raw | weighted (driven by the "Weight-adjusted" toggle)
+  rankMode: 'weighted',        // raw | weighted (driven by the shared "Weight-adjusted" toggle, used by Ranking / Compare / City detail)
   costAdjusted: true,          // master on/off for the cost (value-per-$) layer
   costK: window.SUGGESTED_K ?? 1.0,  // cost-sensitivity exponent — default from suggested-weights.js (applies only when costAdjusted)
   housingMode: 'shared',       // single (1BR) | shared (4BR split 4 ways)
@@ -488,6 +487,205 @@ function currentFilteredList() {
   return { list, maxScore };
 }
 
+// ── Shared score-mode toggles ────────────────────────────────────────────────
+// The two on/off switches — Weight-adjusted and Cost-adjusted — surfaced on the
+// Ranking, Compare and City-detail tabs alike. Both mutate the shared `State`
+// and trigger a full render(), so the active tab re-renders with the new mode.
+//   Weight-adjusted ON  → rank by your weighted criteria; OFF → raw scores (every criterion ×1).
+//   Cost-adjusted   ON  → quality × cost multiplier (cheaper-than-median boosted); OFF → cost ignored.
+// Extracted on its own so Compare / City-detail can show JUST these toggles,
+// while the Ranking tab pairs them with the deeper cost + weights controls.
+function renderModeToggles() {
+  const rankMode = State.rankMode || 'weighted';
+  State.rankMode = rankMode;
+  function modeToggle(label, isOn, onClick, tip) {
+    return el('button', {
+      class: 'small toggle-btn' + (isOn ? ' on' : ''),
+      'data-tip': tip,
+      onclick: onClick,
+    }, el('span', { class: 'toggle-box' }, isOn ? '✓' : ''), label);
+  }
+  return el('div', { class: 'row', style: { marginTop: '0.5rem', gap: '0.5rem' } },
+    el('span', { class: 'muted' }, 'Score mode:'),
+    modeToggle('Weight-adjusted', rankMode === 'weighted', () => {
+      State.rankMode = rankMode === 'weighted' ? 'raw' : 'weighted';
+      render();
+    }, 'On: rank by your weighted criteria. Off: every criterion counts equally (raw 1–10 scores); your weight sliders are preserved but not applied.'),
+    modeToggle('Cost-adjusted', State.costAdjusted, () => {
+      State.costAdjusted = !State.costAdjusted;
+      persistCostAdjusted();
+      render();
+    }, "On: multiply each city's quality by a cost multiplier — cities below the set's median monthly burn get boosted, pricier ones penalised, scaled by the Cost sensitivity slider. Off: cost is ignored; the ranking is pure quality."),
+  );
+}
+
+// ── Ranking-tab control cluster ──────────────────────────────────────────────
+// The Ranking ("front page") tab's full control cluster: the shared score-mode
+// toggles plus the deeper cost controls (cost-sensitivity slider, housing-mode
+// toggle) and the collapsible per-criterion weights panel. The deeper controls
+// live ONLY here — Compare and City-detail render renderModeToggles() alone.
+//
+// opts.onRebuild: optional callback for a targeted re-render after a slider
+// drag. The Ranking tab passes its `rebuildBody` (rebuilds only the table body
+// so the slider DOM survives mid-drag); callers that omit it fall back to a
+// full render().
+function renderControlCluster(opts = {}) {
+  const onRebuild = opts.onRebuild || render;
+
+  const rankMode = State.rankMode || 'weighted';
+  State.rankMode = rankMode;
+  const modeToggles = renderModeToggles();
+
+  // ── Cost controls — value-per-dollar adjustment ─────────────────────────────
+  // The cost-sensitivity slider sets exponent k; the housing toggle picks which
+  // rent figure feeds burn. Both are only meaningful while "Cost-adjusted" is on,
+  // so the slider is disabled when it's off.
+  const kNum = el('input', {
+    type: 'number', min: '0', max: '1', step: '0.1', class: 'weight-num', value: State.costK,
+  });
+  const kSlider = el('input', {
+    type: 'range', min: '0', max: '1', step: '0.1', value: State.costK, class: 'cost-k-slider',
+  });
+  kNum.disabled = kSlider.disabled = !State.costAdjusted;
+  function applyCostK(v, syncSlider, syncNum) {
+    v = Math.max(0, Math.min(1, Math.round(v * 10) / 10));
+    State.costK = v;
+    if (syncSlider) kSlider.value = v;
+    if (syncNum) kNum.value = v;
+    persistCostK();
+    onRebuild();
+  }
+  kSlider.addEventListener('input', () => {
+    const v = parseFloat(kSlider.value);
+    if (!isNaN(v)) applyCostK(v, false, true);
+  });
+  kNum.addEventListener('input', () => {
+    const v = parseFloat(kNum.value);
+    if (!isNaN(v)) applyCostK(v, true, false);
+  });
+  kNum.addEventListener('change', () => {
+    let v = parseFloat(kNum.value);
+    if (isNaN(v)) v = State.costK;
+    applyCostK(v, true, true);
+  });
+  const costSlider = el('div', { class: 'cost-slider-row' + (State.costAdjusted ? '' : ' disabled') },
+    kNum,
+    kSlider,
+  );
+  const housingToggle = el('div', { class: 'row', style: { gap: '0.4rem' } },
+    el('span', { class: 'muted' }, 'Housing:'),
+    ...[
+      { v: 'single', label: 'Single (1BR)' },
+      { v: 'shared', label: 'Shared (4BR ÷ 4)' },
+    ].map(o => el('button', {
+      class: 'small' + (State.housingMode === o.v ? ' primary' : ''),
+      'data-tip': 'Which rent figure feeds the monthly burn used for the cost adjustment.',
+      onclick: () => { State.housingMode = o.v; persistHousingMode(); render(); },
+    }, o.label)),
+  );
+  const costControls = el('div', { class: 'cost-controls', style: { marginTop: '0.6rem' } },
+    el('div', { class: 'row', style: { gap: '0.55rem' } },
+      el('span', { class: 'muted' }, 'Cost sensitivity:'),
+      costSlider,
+      el('span', { class: 'muted', style: { fontSize: '0.8rem' } },
+        '— 1 weighs cost linearly (full value-per-dollar); below 1 dampens it; 0 leaves cost out entirely'),
+    ),
+    el('div', { class: 'row', style: { gap: '0.4rem', marginTop: '0.45rem' } },
+      housingToggle,
+    ),
+  );
+
+  // ── Customize-weights panel ─────────────────────────────────────────────────
+  // Flat list of all criteria in a column-major grid. Sort order is a view
+  // preference; it only re-applies on button click, not during a slider drag
+  // (so sliders don't jump around mid-drag).
+  const weightSort = State.weightSort || 'alpha';
+  State.weightSort = weightSort;
+  const sortedCrits = CRITERIA.slice();
+  if (weightSort === 'weight') {
+    sortedCrits.sort((a, b) => (State.weights[b.slug] - State.weights[a.slug]) || a.label.localeCompare(b.label));
+  } else {
+    sortedCrits.sort((a, b) => a.label.localeCompare(b.label));
+  }
+  const weightSortRow = el('div', { class: 'row', style: { marginBottom: '0.6rem' } },
+    el('span', { class: 'muted' }, 'Sort criteria:'),
+    el('button', {
+      class: 'small' + (weightSort === 'alpha' ? ' primary' : ''),
+      onclick: () => { State.weightSort = 'alpha'; render(); },
+    }, 'A–Z'),
+    el('button', {
+      class: 'small' + (weightSort === 'weight' ? ' primary' : ''),
+      'data-tip': 'Order criteria by your current weight, highest first — so the ones you care about most rise to the top.',
+      onclick: () => { State.weightSort = 'weight'; render(); },
+    }, 'By weight'),
+  );
+
+  const weightInputs = el('div', { class: 'weights' });
+  const critDefsW = DATA.criterion_defs || {};
+  for (const c of sortedCrits) {
+    const row = el('div', { class: 'weight-row' });
+    const def = critDefsW[c.slug];
+    row.appendChild(el('span', def ? { class: 'lbl', 'data-tip': def } : { class: 'lbl' }, c.label));
+
+    // Editable number field + slider, both 0–10 in 0.1 steps, kept in sync.
+    const numInput = el('input', {
+      type: 'number', min: '0', max: '10', step: '0.1',
+      class: 'weight-num', value: State.weights[c.slug],
+    });
+    const slider = el('input', { type: 'range', min: '0', max: '10', step: '0.1', value: State.weights[c.slug] });
+
+    function apply(v, syncSlider, syncNum) {
+      v = Math.max(0, Math.min(10, Math.round(v * 10) / 10));
+      State.weights[c.slug] = v;
+      if (syncSlider) slider.value = v;
+      if (syncNum) numInput.value = v;
+      persistWeights();
+      onRebuild();   // Ranking: targeted body rebuild; other tabs: full render
+    }
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      if (!isNaN(v)) apply(v, false, true);
+    });
+    numInput.addEventListener('input', () => {
+      const v = parseFloat(numInput.value);
+      if (!isNaN(v)) apply(v, true, false);
+    });
+    numInput.addEventListener('change', () => {
+      // Final clamp on blur / Enter — also fixes an empty or out-of-range entry
+      let v = parseFloat(numInput.value);
+      if (isNaN(v)) v = State.weights[c.slug];
+      apply(v, true, true);
+    });
+
+    row.appendChild(el('span', { class: 'num-wrap' },
+      el('span', { class: 'num-x' }, '×'),
+      numInput,
+    ));
+    row.appendChild(slider);
+    weightInputs.appendChild(row);
+  }
+
+  const presets = el('div', { class: 'preset-bar' },
+    el('span', { class: 'muted' }, 'Reset weights:'),
+    el('button', { class: 'small', onclick: () => resetWeights('suggested') }, 'To suggested baseline'),
+    el('button', { class: 'small', onclick: () => resetWeights('zero') }, 'To 0'),
+    el('span', { class: 'spacer' }),
+    el('button', {
+      class: 'small primary',
+      'data-tip': 'Copies a URL that reproduces your current weight sliders. Anyone who opens it sees the ranking computed with these exact weights — use it to share your priorities.',
+      onclick: () => copyShareLink(),
+    }, 'Copy link to these weights'),
+  );
+
+  // Weight panel only relevant in Weight-adjusted mode
+  const weightsBlock = rankMode === 'weighted' ? detailsBlock('weights',
+    [el('strong', {}, '⚖️ Customize weights'), ' ', el('span', { class: 'muted' }, '— tweak how much each criterion counts')],
+    presets, weightSortRow, weightInputs,
+  ) : null;
+
+  return el('div', { class: 'control-cluster' }, modeToggles, costControls, weightsBlock);
+}
+
 function renderRanking() {
   let tbodyEl = null;
   let theadEl = null;
@@ -589,87 +787,6 @@ function renderRanking() {
     tbodyEl = newBody;
   }
 
-  // Customize panel — flat list of all criteria in a column-major grid.
-  // Sort order is a view preference; it only re-applies on button click, not
-  // during a slider drag (so sliders don't jump around mid-drag).
-  const weightSort = State.weightSort || 'alpha';
-  State.weightSort = weightSort;
-  const sortedCrits = CRITERIA.slice();
-  if (weightSort === 'weight') {
-    sortedCrits.sort((a, b) => (State.weights[b.slug] - State.weights[a.slug]) || a.label.localeCompare(b.label));
-  } else {
-    sortedCrits.sort((a, b) => a.label.localeCompare(b.label));
-  }
-  const weightSortRow = el('div', { class: 'row', style: { marginBottom: '0.6rem' } },
-    el('span', { class: 'muted' }, 'Sort criteria:'),
-    el('button', {
-      class: 'small' + (weightSort === 'alpha' ? ' primary' : ''),
-      onclick: () => { State.weightSort = 'alpha'; render(); },
-    }, 'A–Z'),
-    el('button', {
-      class: 'small' + (weightSort === 'weight' ? ' primary' : ''),
-      'data-tip': 'Order criteria by your current weight, highest first — so the ones you care about most rise to the top.',
-      onclick: () => { State.weightSort = 'weight'; render(); },
-    }, 'By weight'),
-  );
-
-  const weightInputs = el('div', { class: 'weights' });
-  const critDefsW = DATA.criterion_defs || {};
-  for (const c of sortedCrits) {
-    const row = el('div', { class: 'weight-row' });
-    const def = critDefsW[c.slug];
-    row.appendChild(el('span', def ? { class: 'lbl', 'data-tip': def } : { class: 'lbl' }, c.label));
-
-    // Editable number field + slider, both 0–10 in 0.1 steps, kept in sync.
-    const numInput = el('input', {
-      type: 'number', min: '0', max: '10', step: '0.1',
-      class: 'weight-num', value: State.weights[c.slug],
-    });
-    const slider = el('input', { type: 'range', min: '0', max: '10', step: '0.1', value: State.weights[c.slug] });
-
-    function apply(v, syncSlider, syncNum) {
-      v = Math.max(0, Math.min(10, Math.round(v * 10) / 10));
-      State.weights[c.slug] = v;
-      if (syncSlider) slider.value = v;
-      if (syncNum) numInput.value = v;
-      persistWeights();
-      rebuildBody();   // targeted: rebuilds only the table body, slider DOM survives
-    }
-    slider.addEventListener('input', () => {
-      const v = parseFloat(slider.value);
-      if (!isNaN(v)) apply(v, false, true);
-    });
-    numInput.addEventListener('input', () => {
-      const v = parseFloat(numInput.value);
-      if (!isNaN(v)) apply(v, true, false);
-    });
-    numInput.addEventListener('change', () => {
-      // Final clamp on blur / Enter — also fixes an empty or out-of-range entry
-      let v = parseFloat(numInput.value);
-      if (isNaN(v)) v = State.weights[c.slug];
-      apply(v, true, true);
-    });
-
-    row.appendChild(el('span', { class: 'num-wrap' },
-      el('span', { class: 'num-x' }, '×'),
-      numInput,
-    ));
-    row.appendChild(slider);
-    weightInputs.appendChild(row);
-  }
-
-  const presets = el('div', { class: 'preset-bar' },
-    el('span', { class: 'muted' }, 'Reset weights:'),
-    el('button', { class: 'small', onclick: () => resetWeights('suggested') }, 'To suggested baseline'),
-    el('button', { class: 'small', onclick: () => resetWeights('zero') }, 'To 0'),
-    el('span', { class: 'spacer' }),
-    el('button', {
-      class: 'small primary',
-      'data-tip': 'Copies a URL that reproduces your current weight sliders. Anyone who opens it sees the ranking computed with these exact weights — use it to share your priorities.',
-      onclick: () => copyShareLink(),
-    }, 'Copy link to these weights'),
-  );
-
   // City subset chips. Star control for My picks lives on the table rows (not here).
   const cityChips = el('div', { class: 'chip-tray' });
   const sortedAll = CITIES.slice().sort((a,b) => a.name.localeCompare(b.name));
@@ -710,92 +827,9 @@ function renderRanking() {
   // Initial body render — must happen before the table element is inserted into the DOM
   rebuildBody();
 
-  // Score-mode toggles — two independent switches.
-  //   Weight-adjusted ON  → rank by your weighted criteria; OFF → raw scores (every criterion ×1).
-  //   Cost-adjusted   ON  → quality × cost multiplier (cheaper-than-median boosted); OFF → cost ignored.
-  const rankMode = State.rankMode || 'weighted';
-  State.rankMode = rankMode;
-  function modeToggle(label, isOn, onClick, tip) {
-    return el('button', {
-      class: 'small toggle-btn' + (isOn ? ' on' : ''),
-      'data-tip': tip,
-      onclick: onClick,
-    }, el('span', { class: 'toggle-box' }, isOn ? '✓' : ''), label);
-  }
-  const modeToggles = el('div', { class: 'row', style: { marginTop: '0.5rem', gap: '0.5rem' } },
-    el('span', { class: 'muted' }, 'Score mode:'),
-    modeToggle('Weight-adjusted', rankMode === 'weighted', () => {
-      State.rankMode = rankMode === 'weighted' ? 'raw' : 'weighted';
-      render();
-    }, 'On: rank by your weighted criteria. Off: every criterion counts equally (raw 1–10 scores); your weight sliders are preserved but not applied.'),
-    modeToggle('Cost-adjusted', State.costAdjusted, () => {
-      State.costAdjusted = !State.costAdjusted;
-      persistCostAdjusted();
-      render();
-    }, "On: multiply each city's quality by a cost multiplier — cities below the set's median monthly burn get boosted, pricier ones penalised, scaled by the Cost sensitivity slider. Off: cost is ignored; the ranking is pure quality."),
-  );
-
-  // ── Cost controls — value-per-dollar adjustment ─────────────────────────────
-  // The cost-sensitivity slider sets exponent k; the housing toggle picks which
-  // rent figure feeds burn. Both are only meaningful while "Cost-adjusted" is on,
-  // so the slider is disabled when it's off.
-  // Cost-sensitivity value (the exponent in multiplier = (median burn ÷ city burn)^value).
-  // Editable number field on the left + slider on the right, kept in sync — same
-  // layout as the weight rows.
-  const kNum = el('input', {
-    type: 'number', min: '0', max: '1', step: '0.1', class: 'weight-num', value: State.costK,
-  });
-  const kSlider = el('input', {
-    type: 'range', min: '0', max: '1', step: '0.1', value: State.costK, class: 'cost-k-slider',
-  });
-  kNum.disabled = kSlider.disabled = !State.costAdjusted;
-  function applyCostK(v, syncSlider, syncNum) {
-    v = Math.max(0, Math.min(1, Math.round(v * 10) / 10));
-    State.costK = v;
-    if (syncSlider) kSlider.value = v;
-    if (syncNum) kNum.value = v;
-    persistCostK();
-    rebuildBody();
-  }
-  kSlider.addEventListener('input', () => {
-    const v = parseFloat(kSlider.value);
-    if (!isNaN(v)) applyCostK(v, false, true);
-  });
-  kNum.addEventListener('input', () => {
-    const v = parseFloat(kNum.value);
-    if (!isNaN(v)) applyCostK(v, true, false);
-  });
-  kNum.addEventListener('change', () => {
-    let v = parseFloat(kNum.value);
-    if (isNaN(v)) v = State.costK;
-    applyCostK(v, true, true);
-  });
-  const costSlider = el('div', { class: 'cost-slider-row' + (State.costAdjusted ? '' : ' disabled') },
-    kNum,
-    kSlider,
-  );
-  const housingToggle = el('div', { class: 'row', style: { gap: '0.4rem' } },
-    el('span', { class: 'muted' }, 'Housing:'),
-    ...[
-      { v: 'single', label: 'Single (1BR)' },
-      { v: 'shared', label: 'Shared (4BR ÷ 4)' },
-    ].map(o => el('button', {
-      class: 'small' + (State.housingMode === o.v ? ' primary' : ''),
-      'data-tip': 'Which rent figure feeds the monthly burn used for the cost adjustment.',
-      onclick: () => { State.housingMode = o.v; persistHousingMode(); render(); },
-    }, o.label)),
-  );
-  const costControls = el('div', { class: 'cost-controls', style: { marginTop: '0.6rem' } },
-    el('div', { class: 'row', style: { gap: '0.55rem' } },
-      el('span', { class: 'muted' }, 'Cost sensitivity:'),
-      costSlider,
-      el('span', { class: 'muted', style: { fontSize: '0.8rem' } },
-        '— 1 weighs cost linearly (full value-per-dollar); below 1 dampens it; 0 leaves cost out entirely'),
-    ),
-    el('div', { class: 'row', style: { gap: '0.4rem', marginTop: '0.45rem' } },
-      housingToggle,
-    ),
-  );
+  // Shared score-mode controls — Ranking passes its targeted `rebuildBody` so
+  // slider drags rebuild only the table body (the slider DOM survives).
+  const controlCluster = renderControlCluster({ onRebuild: rebuildBody });
 
   // Intro
   const intro = el('div', { class: 'card' },
@@ -803,13 +837,7 @@ function renderRanking() {
     el('p', { class: 'muted', style: { marginBottom: '0.5rem' } },
       "Re-rank live by adjusting per-criterion weight sliders or selecting a subset of cities. Weights, cost settings and city selection persist locally; ", el('em', {}, 'Copy link to these weights'), ' produces a URL that reproduces them for someone else.',
     ),
-    modeToggles,
-    costControls,
-    // Weight panel only relevant in Weight-adjusted mode
-    rankMode === 'weighted' ? detailsBlock('weights',
-      [el('strong', {}, '⚖️ Customize weights'), ' ', el('span', { class: 'muted' }, '— tweak how much each criterion counts')],
-      presets, weightSortRow, weightInputs,
-    ) : null,
+    controlCluster,
     detailsBlock('cities',
       [el('strong', {}, '🏙️ Select cities'), ' ', el('span', { class: 'muted' }, '— include/exclude cities from the ranking')],
       cityChips, cityControls,
@@ -1009,11 +1037,22 @@ function renderCityDetail() {
   State.cityDetail = cityId;
   const city = CITIES.find(c => c.id === cityId) || CITIES[0];
 
-  // Compute current rank + score under user weights
-  const { list: weighted, maxScore } = rankCities(State.weights);
+  // Compute current rank + score the same way the Ranking tab does: effective
+  // weights (raw mode → all ×1) and, when Cost-adjusted is on, the value-per-$
+  // cost layer applied to the aggregate. `final` is the cost-adjusted total
+  // (equals `total` when the cost layer is off). Ranked over ALL cities so the
+  // "#N of M" reading matches the Ranking tab's notion of position.
+  const eff = effectiveRankWeights();
+  const { list: rankedRaw, maxScore } = rankCities(eff);
+  const weighted = applyCostLayer(rankedRaw);
   const myRow = weighted.find(r => r.city.id === city.id);
   const myRank = weighted.findIndex(r => r.city.id === city.id) + 1;
-  const myTotal = myRow?.total ?? 0;
+  const myQuality = myRow?.total ?? 0;          // pre-cost quality (raw or weighted)
+  const myMult = myRow?.multiplier ?? 1;
+  const myTotal = myRow?.final ?? 0;            // cost-adjusted aggregate (== myQuality when cost off)
+  const isRawMode = State.rankMode === 'raw';
+  const costOn = State.costAdjusted && effectiveCostK() !== 0;
+  const qualityWord = isRawMode ? 'raw' : 'weighted';
 
   // Header dropdown — sorted alphabetically (avoids anchoring to any particular ranking)
   const sel = el('select', { onchange: e => go('city', e.target.value) });
@@ -1061,19 +1100,29 @@ function renderCityDetail() {
     ),
     el('div', { class: 'row', style: { marginTop: '0.75rem' } },
       maxScore > 0 ? el('div', {},
-        el('div', { class: 'muted' }, 'Rank (your weights)'),
+        el('div', { class: 'muted' }, 'Rank (' + (isRawMode ? 'raw scores' : 'your weights') + (costOn ? ', cost-adjusted' : '') + ')'),
         el('div', { style: { fontSize: '1.4rem', fontWeight: 600 } }, '#' + myRank + ' ',
           el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } }, 'of ' + CITIES.length))) : null,
       maxScore > 0 ? el('div', {},
-        el('div', { class: 'muted' }, 'Weighted score'),
-        el('div', { style: { fontSize: '1.4rem', fontWeight: 600 } }, fmt(myTotal) + ' ',
-          el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } }, '/' + fmt(maxScore)))) : null,
+        el('div', { class: 'muted' }, costOn
+          ? (isRawMode ? 'Raw score, cost-adjusted' : 'Weighted score, cost-adjusted')
+          : (isRawMode ? 'Raw score' : 'Weighted score')),
+        el('div', { style: { fontSize: '1.4rem', fontWeight: 600 } },
+          // Cost on: aggregate is quality × multiplier; the /max scale no longer
+          // applies (the multiplier can push past max), so surface the multiplier.
+          // Cost off: classic "score / max possible".
+          costOn
+            ? [fmt(myTotal) + ' ', el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } },
+                fmt(myQuality) + ' ' + qualityWord + ' × ' + fmt(myMult) + ' cost')]
+            : [fmt(myTotal) + ' ', el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } }, '/' + fmt(maxScore))],
+        )) : null,
     ),
-    // Dynamic top/bottom under current weights, rendered as readable stacked rows
+    // Dynamic top/bottom under the effective weights (raw mode → all ×1),
+    // rendered as readable stacked rows
     (function () {
       const items = CRITERIA
         .map(crit => {
-          const w = State.weights[crit.slug] || 0;
+          const w = eff[crit.slug] || 0;
           const s = city.scores[crit.slug];
           if (s == null) return null;
           const short = crit.label.replace(/\s*\([^)]*\)\s*$/, '').replace(/\s*\(mo, USD\)/, '');
@@ -1087,10 +1136,11 @@ function renderCityDetail() {
         return el('div', { class: 'contrib-row' },
           el('span', { class: 'contrib-name' }, x.label),
           scoreChip(x.score),
-          mode === 'contrib' ? el('span', { class: 'contrib-w' }, `× ${x.weight}`) : el('span'),
+          mode === 'contrib' && !isRawMode ? el('span', { class: 'contrib-w' }, `× ${x.weight}`) : el('span'),
         );
       }
-      const mode = maxScore > 0 ? 'contrib' : 'score';
+      // In raw mode contributions equal raw scores, so just show the score order.
+      const mode = (maxScore > 0 && !isRawMode) ? 'contrib' : 'score';
       const topItems = mode === 'contrib' ? byContrib.slice(0, 3) : byScoreDesc.slice(0, 3);
       const botItems = mode === 'contrib' ? byContrib.slice(-3).reverse() : byScoreAsc.slice(0, 3);
       return el('div', { style: { marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' } },
@@ -1124,18 +1174,19 @@ function renderCityDetail() {
     ),
   ) : null;
 
-  // Criteria cards with per-criterion contribution under user weights
+  // Criteria cards with per-criterion contribution under the effective weights
+  // (raw mode → every criterion ×1, matching the Ranking tab).
   const critWrap = el('div', { class: 'card' });
   // Toggle for sort: contribution (default when weights are non-uniform) vs original order
   if (!State.cityCritSort) {
     // Default: contribution when weights vary, alphabetical otherwise
-    const allEqual = CRITERIA.every(c => State.weights[c.slug] === State.weights[CRITERIA[0].slug]);
+    const allEqual = CRITERIA.every(c => eff[c.slug] === eff[CRITERIA[0].slug]);
     State.cityCritSort = allEqual ? 'name' : 'contribution';
   }
   const sortToggle = el('div', { class: 'row', style: { gap: '0.4rem', margin: '0.6rem 0 0.9rem' } },
     el('span', { class: 'muted', style: { fontSize: '0.82rem' } }, 'Sort criteria by:'),
     ...[
-      { v: 'contribution', label: 'Contribution (score × your weight)' },
+      { v: 'contribution', label: isRawMode ? 'Contribution (= raw score)' : 'Contribution (score × your weight)' },
       { v: 'score',        label: 'Raw score' },
       { v: 'name',         label: 'Name (A–Z)' },
     ].map(o => el('button', {
@@ -1147,7 +1198,7 @@ function renderCityDetail() {
   // Build sortable list of (meta, score, weight, contribution)
   const critEntries = CRITERIA.map(meta => {
     const sc = city.scores[meta.slug];
-    const w = State.weights[meta.slug] || 0;
+    const w = eff[meta.slug] || 0;
     return { meta, score: sc, weight: w, contrib: sc != null ? sc * w : null };
   });
   if (State.cityCritSort === 'contribution') {
@@ -1160,7 +1211,9 @@ function renderCityDetail() {
 
   critWrap.appendChild(el('h3', {}, 'All criteria'));
   critWrap.appendChild(el('p', { class: 'muted' },
-    'Each card shows: 1–10 score · contribution under your weights (score × weight) · prose · source citations + verification flag. Cards with weight = 0 are dimmed.',
+    isRawMode
+      ? 'Each card shows: 1–10 score · prose · source citations + verification flag. Weight-adjusted mode is off, so every criterion counts equally.'
+      : 'Each card shows: 1–10 score · contribution under your weights (score × weight) · prose · source citations + verification flag. Cards with weight = 0 are dimmed.',
   ));
   critWrap.appendChild(sortToggle);
 
@@ -1174,8 +1227,9 @@ function renderCityDetail() {
       scoreChip(sc),
       el('span', def ? { class: 'crit-label', 'data-tip': def } : { class: 'crit-label' }, meta.label),
     );
-    // Contribution badge / bar
-    if (sc != null) {
+    // Contribution badge / bar — skipped in raw mode (contribution = raw score,
+    // so a "8×1=8" badge would just be noise; the score chip already says it).
+    if (sc != null && !isRawMode) {
       const cb = el('span', { class: 'contrib-bar' + (isZero ? ' cb-zero' : '') },
         el('span', { class: 'mono muted' }, `${sc}×${w}=`),
         el('span', { class: 'cb-val' }, fmt(contrib || 0)),
@@ -1257,7 +1311,19 @@ function renderCityDetail() {
 
   const costPanel = renderCostPanel(city);
 
-  return el('div', {}, header, horizonNotes, critWrap, costPanel, livWrap);
+  // Shared score-mode toggles — Weight-adjusted + Cost-adjusted, the same two
+  // switches the Ranking and Compare tabs show, driving the same State. The
+  // deeper cost slider / housing toggle / weights panel stay on the Ranking
+  // tab. Each toggle triggers a full render(), re-rendering this tab.
+  const controls = el('div', { class: 'card' },
+    el('p', { class: 'muted', style: { marginTop: 0, marginBottom: '0.4rem', fontSize: '0.86rem' } },
+      'Score mode — shared with the Ranking and Compare tabs. Weight-adjusted and Cost-adjusted change the score and rank shown above. Cost sensitivity, housing mode and per-criterion weights live on the Ranking tab.'),
+    renderModeToggles(),
+  );
+
+  // Order: controls · header (rank/score) · horizon-fit notes · cost-of-living
+  // card · per-criterion list · living arrangements.
+  return el('div', {}, controls, header, horizonNotes, costPanel, critWrap, livWrap);
 }
 
 // ============================================================
@@ -1299,18 +1365,11 @@ function renderCompare() {
     chips.appendChild(chip);
   }
 
-  // Raw/weighted mode toggle
-  const mode = State.compareMode || 'raw';
-  State.compareMode = mode;
-  const scopeOpts = el('div', { class: 'row', style: { gap: '1.5rem', flexWrap: 'wrap' } },
-    el('div', { class: 'row' },
-      el('span', { class: 'muted' }, 'Score mode:'),
-      ...['raw','weighted'].map(m => el('button', {
-        class: 'small' + (mode === m ? ' primary' : ''),
-        onclick: () => { State.compareMode = m; render(); },
-      }, m === 'raw' ? 'Raw scores' : 'Weight-adjusted')),
-    ),
-  );
+  // Score mode is shared with the Ranking tab via State.rankMode. `mode` here
+  // mirrors that ('raw' | 'weighted'); the toggle itself lives in the shared
+  // control cluster rendered at the top of the tab.
+  const mode = State.rankMode || 'weighted';
+  State.rankMode = mode;
 
   // Sort toggle for criteria rows
   if (!State.compareCritSort) State.compareCritSort = 'original';
@@ -1385,21 +1444,36 @@ function renderCompare() {
   thead.appendChild(headRow);
   t.appendChild(thead);
   const tbody = el('tbody');
-  // Total row (weighted mode only) — sum of contributions across all criteria per city
+  // Total row (weighted mode only) — sum of contributions across all criteria
+  // per city, then the value-per-$ cost layer applied to that aggregate, exactly
+  // as the Ranking tab does. Cost adjustment touches ONLY this aggregate row;
+  // the per-criterion cells below are never cost-adjusted. When Cost-adjusted is
+  // off, effectiveCostK() is 0 → every multiplier is 1 → totals == quality.
+  const compareCostOn = State.costAdjusted && effectiveCostK() !== 0;
   if (mode === 'weighted') {
-    const totals = selectedCities.map(c => CRITERIA.reduce((sum, m) => {
+    const medBurn = medianBurn();
+    // Pre-cost weighted quality per city
+    const quality = selectedCities.map(c => CRITERIA.reduce((sum, m) => {
       const s = c.scores[m.slug];
       if (s == null) return sum;
       return sum + s * (State.weights[m.slug] || 0);
     }, 0));
+    const mults = selectedCities.map(c => costMultiplier(c, effectiveCostK(), State.housingMode, medBurn));
+    // Cost-adjusted aggregate — what the row displays and what diffs use.
+    const totals = quality.map((q, i) => q * mults[i]);
     const max = Math.max(...totals);
     const tr = el('tr', { class: 'totals-row' });
-    tr.appendChild(el('td', {}, el('strong', {}, 'Total weighted')));
+    tr.appendChild(el('td', {}, el('strong', {}, compareCostOn ? 'Total (cost-adjusted)' : 'Total weighted')));
     selectedCities.forEach((c, i) => {
       const isMax = totals[i] === max && max > 0;
-      tr.appendChild(el('td', { class: 'score-cell totals-cell' + (isMax ? ' totals-max' : '') },
-        el('strong', {}, fmt(totals[i])),
-      ));
+      const cell = el('td', { class: 'score-cell totals-cell' + (isMax ? ' totals-max' : '') },
+        el('strong', {}, fmt(totals[i])));
+      // When cost-adjusted, show how the aggregate was formed (quality × mult).
+      if (compareCostOn) {
+        cell.appendChild(el('div', { class: 'dim mono', style: { fontSize: '0.68rem', fontWeight: 400 } },
+          fmt(quality[i]) + ' × ' + fmt(mults[i])));
+      }
+      tr.appendChild(cell);
     });
     if (isHeadToHead) {
       const [a, b] = totals;
@@ -1506,11 +1580,21 @@ function renderCompare() {
     bulkRow,
     el('div', { class: 'muted', style: { marginTop: '0.6rem' } }, 'Selected (' + State.compareCities.length + '):'),
     chips,
-    el('div', { style: { marginTop: '0.75rem' } }, scopeOpts),
     critSortOpts,
   );
 
-  return el('div', {}, intro, winsSummary, el('div', { class: 'card' }, matrix));
+  // Shared score-mode toggles — Weight-adjusted + Cost-adjusted, the same two
+  // switches the Ranking and City-detail tabs show. Weight-adjusted drives the
+  // matrix mode (raw chips vs score × weight); Cost-adjusted re-weights the
+  // Total row only. The deeper cost slider / housing toggle / weights panel
+  // stay on the Ranking tab. Each toggle triggers a full render().
+  const controls = el('div', { class: 'card' },
+    el('p', { class: 'muted', style: { marginTop: 0, marginBottom: '0.4rem', fontSize: '0.86rem' } },
+      'Score mode — shared with the Ranking and City-detail tabs. Weight-adjusted switches the matrix between raw scores and score × weight; Cost-adjusted re-weights the Total row. Cost sensitivity, housing mode and per-criterion weights live on the Ranking tab.'),
+    renderModeToggles(),
+  );
+
+  return el('div', {}, intro, controls, winsSummary, el('div', { class: 'card' }, matrix));
 }
 
 // ============================================================
@@ -1617,10 +1701,11 @@ function clearAllPicks() {
   render();
 }
 function seedFromTop10() {
-  // Recompute "top 10" with all-equal weights so this isn't anchored to any
-  // particular weighting scheme.
-  const equal = Object.fromEntries(CRITERIA.map(c => [c.slug, 1]));
-  const { list } = rankCities(equal);
+  // Seed from the SAME ranked list the Ranking tab currently shows: the user's
+  // effective weights (raw mode → all ×1) with the cost adjustment applied.
+  // currentFilteredList() is that exact pipeline; it also honours the Ranking
+  // tab's city selection, so "top 10" means the top 10 the user is looking at.
+  const { list } = currentFilteredList();
   State.myPicks = list.slice(0, 10).map(r => r.city.id);
   persistMyPicks();
   render();
