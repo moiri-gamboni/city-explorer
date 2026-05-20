@@ -1047,12 +1047,9 @@ function renderCityDetail() {
   const weighted = applyCostLayer(rankedRaw);
   const myRow = weighted.find(r => r.city.id === city.id);
   const myRank = weighted.findIndex(r => r.city.id === city.id) + 1;
-  const myQuality = myRow?.total ?? 0;          // pre-cost quality (raw or weighted)
-  const myMult = myRow?.multiplier ?? 1;
-  const myTotal = myRow?.final ?? 0;            // cost-adjusted aggregate (== myQuality when cost off)
+  const myTotal = myRow?.final ?? 0;            // cost-adjusted aggregate (equals quality when cost off)
   const isRawMode = State.rankMode === 'raw';
   const costOn = State.costAdjusted && effectiveCostK() !== 0;
-  const qualityWord = isRawMode ? 'raw' : 'weighted';
 
   // Header dropdown — sorted alphabetically (avoids anchoring to any particular ranking)
   const sel = el('select', { onchange: e => go('city', e.target.value) });
@@ -1108,12 +1105,10 @@ function renderCityDetail() {
           ? (isRawMode ? 'Raw score, cost-adjusted' : 'Weighted score, cost-adjusted')
           : (isRawMode ? 'Raw score' : 'Weighted score')),
         el('div', { style: { fontSize: '1.4rem', fontWeight: 600 } },
-          // Cost on: aggregate is quality × multiplier; the /max scale no longer
-          // applies (the multiplier can push past max), so surface the multiplier.
-          // Cost off: classic "score / max possible".
+          // Cost off: classic "score / max possible". Cost on: the multiplier can
+          // push the total past max, so the /max scale is dropped.
           costOn
-            ? [fmt(myTotal) + ' ', el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } },
-                fmt(myQuality) + ' ' + qualityWord + ' × ' + fmt(myMult) + ' cost')]
+            ? fmt(myTotal)
             : [fmt(myTotal) + ' ', el('span', { class: 'muted', style: { fontSize: '0.9rem', fontWeight: 400 } }, '/' + fmt(maxScore))],
         )) : null,
     ),
